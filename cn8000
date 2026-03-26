@@ -1,0 +1,180 @@
+#!/bin/bash
+# console viewer for cn8000 kvm
+# sa-dev@odd.systems 2021, 2026
+
+
+#### either pass the following variables at runtime or define here:
+HOST=$1
+#USER=
+#PASS=
+CURL=${CURL:-"curl --tlsv1.0 -k -4 --silent"}
+#JAVAWS="/opt/time-machine/jre1.8.0_65/bin/javaws"
+JAVAWS=${JAVAWS:-$(command -v javaws)}
+# in non-EWMH window manager, this may be useful for java widgets:
+#FAKE_WMNAME="LG3D"
+####
+
+
+if [ -z "$HOST" -o -z "$USER" -o -z "$PASS" ] ; then
+    echo "use: USER=... PASS=... $0 <host>"
+    exit 1
+fi
+site="https://${HOST}"
+
+if [ \! -x "$JAVAWS" ] ; then
+    echo "javaws is required"
+    exit
+fi
+if [ -n "$FAKE_WMNAME" ] ; then
+    if ! which wmname >/dev/null ; then
+        echo "install wmname utility or disable FAKE_WMNAME"
+        exit
+    fi
+fi
+
+
+kvm_logout() {
+    case "$ktype" in
+        old)
+            $CURL \
+                "${site}/logout.htm?pid=${sid}" | \
+                perl -ne "if (/logged out/) {my \$m=\$_; \$m=~s/\<(.*?)\>//g; print \$m}"
+            ;;
+        new)
+            # TODO
+            true
+            ;;
+    esac
+}
+
+
+cleanup() {
+    kvm_logout
+    if [ -n "$old_wmname" ] ; then
+        wmname "$old_wmname"
+    fi
+    if [ -n "$app" ] ; then
+        rm -f "$app"
+    fi
+}
+
+trap cleanup EXIT
+
+
+detect_kvm_type() {
+    strurl=$($CURL "${site}/" | \
+        perl -ne 'if (/strURL.*\+ "\/(\w+?)"/) {print $1}')
+    if [ -n "$strurl" ] ; then
+        echo "strURL: $strurl"
+        ktype=new
+    else
+        # TODO: real detect, instead of just assuming old version
+        ktype=old
+    fi
+    echo "kvm type: $ktype"
+}
+
+#
+# login to "old" cn8000 and obtain a jnlp
+#
+get_jnlp_old() {
+    ts=`date +%Y.%m.%d.%H.%M.%S.%s000.-180`
+    sesspid=$($CURL \
+        -d "username=$USER" \
+        -d "password=$PASS" \
+        -d "login=Login" \
+        -d "curtime=$ts" \
+        "${site}/view.htm" | \
+        perl -ne "if (/global_sessionpid='(\w+?)'/) {print \$1}")
+    [ -z "$sesspid" ] && echo "no session pid" && exit 1
+    echo "sesspid: $sesspid"
+    app=`mktemp --suffix -${HOST}.jnlp`
+    $CURL \
+        -o "$app" \
+        "${site}/JavaClient.jnlp?pid=$sesspid"
+}
+
+
+get_xid() {
+    printf '0.%017d\n' $(( ( (RANDOM<<45) | (RANDOM<<30) | (RANDOM<<15) | RANDOM ) % 100000000000000000 ))
+}
+
+#
+# login to "new" cn8000 and obtain a jnlp
+#
+get_jnlp_new() {
+    tid=$($CURL "${site}/${strurl}" | \
+        perl -ne "if (/name=\"KVMIP_TARGETID\" value=\"(\w+?)\"/) {print \$1}")
+    [ -z "$tid" ] && echo "no target id" && exit 1
+    echo "tid: $tid"
+
+    sid=$($CURL -v --data-raw "KVMIP_GMTIME=`date +%s`&KVMIP_DIFFTIME=420&KVMIP_LOGIN=${USER}+${PASS}+${HOST}+${tid}&KVMIP_TARGETID=${tid}" "${site}/${strurl}" \
+        2>&1 | perl -ne 'if (/Set-Cookie: sid=(\S+)/) {print $1}')
+    [ -z "$sid" ] && echo "no sessionId" && exit 1
+    echo "sid: $sid"
+
+    xid=$(get_xid)
+    u=$($CURL --data-raw "%2FInquery%3Fupdate=31&com_common=01&xid=${xid}&SID=$sid" "${site}/Inquery")
+    if [ "$u" '!=' "u" ] ; then
+        echo "unexpected: inquery to create jnlp viewer wasn't resulted in \"u\", something's wrong, but continuing"
+    fi
+
+    app=`mktemp --suffix -${HOST}.jnlp`
+    $CURL "${site}/Inquery.jnlp" \
+        -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8' \
+        -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+        -b "sid=$sid" > $app
+}
+
+
+get_jnlp() {
+    case "$ktype" in
+        old)
+            get_jnlp_old
+            ;;
+        new)
+            get_jnlp_new
+            ;;
+    esac
+}
+
+
+run_jnlp() {
+    if [ -n "$FAKE_WMNAME" ] ; then
+        old_wmname=`wmname`
+        wmname "$FAKE_WMNAME"
+    fi
+
+    $JAVAWS "$app"
+
+    # watch/update loop
+    n=0
+    while [ x$(ps -axo "pid,command" | awk "/-${HOST}\.jnlp/{printf \"%s\", \$1}") '!=' x ] ; do
+        if [ $n -gt 9 ] ; then
+            if [ "$ktype" \= old ] ; then
+                $CURL "${site}/session.htm?pid=$sid" >/dev/null \
+                && echo -n k || echo -n \!
+            else
+                # in new version, this inquery returns "Reconnect" on session timeout,
+                # which seems useless for a viewer.
+                #xid=$(get_xid)
+                #$CURL -b "sid=$sid" "${site}/Inquery?query=0&st=0&SID=${sid}&xid=${xid}" \
+                #    >/dev/null && echo -n k || echo -n \!
+                true
+            fi
+            n=0
+        else
+            sleep 1
+        fi
+        n=$[$n+1]
+    done
+    echo
+}
+
+
+####### main
+
+detect_kvm_type
+get_jnlp
+run_jnlp
+#cleanup  # trap EXIT instead
