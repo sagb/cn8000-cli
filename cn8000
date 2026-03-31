@@ -88,7 +88,7 @@ get_jnlp_old() {
         perl -ne "if (/global_sessionpid='(\w+?)'/) {print \$1}")
     [ -z "$sesspid" ] && echo "no session pid" && exit 1
     echo "sesspid: $sesspid"
-    app=`mktemp --suffix -${HOST}.jnlp`
+    t=`mktemp` ; app="$t-${HOST}.jnlp" ; mv -f "$t" "$app"
     $CURL \
         -o "$app" \
         "${site}/JavaClient.jnlp?pid=$sesspid"
@@ -119,7 +119,7 @@ get_jnlp_new() {
         echo "unexpected: inquery to create jnlp viewer wasn't resulted in \"u\", something's wrong, but continuing"
     fi
 
-    app=`mktemp --suffix -${HOST}.jnlp`
+    t=`mktemp` ; app="$t-${HOST}.jnlp" ; mv -f "$t" "$app"
     $CURL "${site}/Inquery.jnlp" \
         -H 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8' \
         -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
@@ -149,7 +149,7 @@ run_jnlp() {
 
     # watch/update loop
     n=0
-    while [ x$(ps -axo "pid,command" | awk "/-${HOST}\.jnlp/{printf \"%s\", \$1}") '!=' x ] ; do
+    while [ -n "$(ps ax -o pid=,command= | awk "/-${HOST}\.jnlp/{print \$1; exit}")" ]; do
         if [ $n -gt 9 ] ; then
             if [ "$ktype" \= old ] ; then
                 $CURL "${site}/session.htm?pid=$sid" >/dev/null \
@@ -160,7 +160,7 @@ run_jnlp() {
                 #xid=$(get_xid)
                 #$CURL -b "sid=$sid" "${site}/Inquery?query=0&st=0&SID=${sid}&xid=${xid}" \
                 #    >/dev/null && echo -n k || echo -n \!
-                true
+                echo -n s
             fi
             n=0
         else
